@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Ape De File Saver - Full Code with Auto Delete + Owner can change time
+Ape De File Saver - Complete Bot with:
+- Force Subscribe + Try Again button
+- Auto Delete (Owner can change time)
+- /settings with inline buttons
+- Moderators, Protect Content, Custom Caption/Button
 """
 
 import os
@@ -126,9 +130,8 @@ async def delete_message_after_delay(chat_id: int, message_id: int, delay_minute
     await asyncio.sleep(delay_minutes * 60)
     try:
         await app.delete_messages(chat_id=chat_id, message_ids=message_id)
-        logger.info(f"Auto deleted message {message_id} after {delay_minutes} minutes")
     except Exception as e:
-        logger.error(f"Failed to auto delete: {e}")
+        logger.error(f"Auto delete failed: {e}")
 
 async def deliver_share(client: Client, share: dict, chat_id: int):
     protect = bool(share.get("protect_content", 0))
@@ -145,10 +148,10 @@ async def deliver_share(client: Client, share: dict, chat_id: int):
     if btn_text and btn_url:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(text=btn_text, url=btn_url)]])
 
-    sent_count = 0
-    settings = get_user_settings(OWNER_ID)  # Owner's setting
+    settings = get_user_settings(OWNER_ID)
     auto_delete_minutes = settings.get("auto_delete_minutes", 15)
 
+    sent_count = 0
     for item in content_list:
         try:
             sent_msg = await client.copy_message(
@@ -160,11 +163,8 @@ async def deliver_share(client: Client, share: dict, chat_id: int):
                 reply_markup=keyboard if (sent_count == len(content_list) - 1) else None
             )
             sent_count += 1
-            
-            # Auto Delete
             if auto_delete_minutes > 0:
                 asyncio.create_task(delete_message_after_delay(chat_id, sent_msg.id, auto_delete_minutes))
-                
         except FloodWait as e:
             await asyncio.sleep(e.value)
         except Exception as e:
@@ -172,7 +172,7 @@ async def deliver_share(client: Client, share: dict, chat_id: int):
 
     if sent_count > 0:
         status = "🔒 Protected" if protect else "🔓 Standard"
-        await client.send_message(chat_id, f"✅ Content delivered! ({sent_count} items)\n{status}\n\n🗑️ Auto delete after {auto_delete_minutes} minutes")
+        await client.send_message(chat_id, f"✅ Content delivered! ({sent_count} items)\n{status}\n🗑️ Auto delete after {auto_delete_minutes} minutes")
 
 # ==================== FORCE SUB ====================
 async def get_missing_force_sub_channels(client: Client, user_id: int) -> list:
@@ -244,30 +244,67 @@ async def autodelete_cmd(client: Client, message: Message):
     if message.from_user.id != OWNER_ID:
         await message.reply("❌ Only owner can change auto delete time.")
         return
-    
-    args = message.text.split()
+    args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.reply("Usage: /autodelete <minutes>\nExample: /autodelete 30")
         return
-    
     try:
-        minutes = int(args[1])
+        minutes = int(args[1].strip())
         if minutes < 0:
             minutes = 0
         update_user_setting(OWNER_ID, "auto_delete_minutes", minutes)
-        await message.reply(f"✅ Auto delete time changed to {minutes} minutes.")
+        await message.reply(f"✅ Auto delete time changed to **{minutes} minutes**.")
     except:
         await message.reply("❌ Invalid number. Use: /autodelete 15")
 
-# /settings
+# /settings with buttons
 @app.on_message(filters.command("settings"))
 async def settings_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     settings = get_user_settings(user_id)
     protect_status = "✅ ON" if settings["protect_content"] else "❌ OFF"
     auto_delete = settings.get("auto_delete_minutes", 15)
-    text = f"⚙️ **Your Settings**\n\n🛡️ Protect Content: {protect_status}\n🗑️ Auto Delete: {auto_delete} minutes\n\n📝 Custom Caption: {settings.get('custom_caption') or 'Not set'}"
-    await message.reply(text)
+    
+    text = f"⚙️ **Your Settings**\n\n🛡️ Protect Content: {protect_status}\n🗑️ Auto Delete: {auto_delete} minutes\n\n📝 Custom Caption: {settings.get('custom_caption') or 'Not set'}\n🔘 Custom Button: {settings.get('custom_button_text') or 'Not set'}"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛡️ Toggle Protect Content", callback_data="toggle_protect")],
+        [InlineKeyboardButton("✏️ Set Custom Caption", callback_data="set_caption")],
+        [InlineKeyboardButton("🔘 Set Custom Button", callback_data="set_button")],
+        [InlineKeyboardButton("🗑️ Change Auto Delete Time", callback_data="change_autodelete")],
+        [InlineKeyboardButton("🔄 Reset Settings", callback_data="reset_settings")]
+    ])
+    
+    await message.reply(text, reply_markup=keyboard)
+
+# Settings Callbacks
+@app.on_callback_query()
+async def settings_callback(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    data = callback.data
+    
+    if data == "toggle_protect":
+        settings = get_user_settings(user_id)
+        new_val = not settings["protect_content"]
+        update_user_setting(user_id, "protect_content", new_val)
+        await callback.answer(f"Protect Content {'Enabled ✅' if new_val else 'Disabled ❌'}")
+        
+    elif data == "set_caption":
+        await callback.message.reply("✏️ Send the new custom caption (or /cancel to abort)")
+        
+    elif data == "set_button":
+        await callback.message.reply("🔘 Send in format: ButtonText|https://url (or /cancel)")
+        
+    elif data == "change_autodelete":
+        await callback.message.reply("🗑️ Send new auto delete time in minutes (e.g. 30) or /cancel")
+        
+    elif data == "reset_settings":
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        await callback.answer("Settings reset to default!")
 
 # Auto store single file
 @app.on_message(filters.media & ~filters.command(["start", "genlink", "batch", "custom_batch", "settings", "done", "autodelete"]))
@@ -305,14 +342,14 @@ async def genlink_cmd(client: Client, message: Message):
 async def batch_start(client: Client, message: Message):
     user_id = message.from_user.id
     batch_sessions[user_id] = []
-    await message.reply("📦 **Batch Mode Started**\n\nSend files. When finished, send /done")
+    await message.reply("📦 **Batch Mode Started**\n\nSend files now. When finished, send /done")
 
 # /custom_batch
 @app.on_message(filters.command("custom_batch"))
 async def custom_batch_start(client: Client, message: Message):
     user_id = message.from_user.id
     batch_sessions[user_id] = []
-    await message.reply("🧩 **Custom Batch Mode**\n\nSend files. When finished, send /done")
+    await message.reply("🧩 **Custom Batch Mode**\n\nSend files now. When finished, send /done")
 
 # /done
 @app.on_message(filters.command("done"))
